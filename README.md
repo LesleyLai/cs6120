@@ -1,0 +1,1 @@
+This repository hosts the implementation of various compiler optimizations for the [Bril](https://capra.cs.cornell.edu/bril/) language. I do this as part of my self-learning journey of [Cornell CS 6120: Advanced Compilers](https://www.cs.cornell.edu/courses/cs6120/2020fa/self-guided/).
