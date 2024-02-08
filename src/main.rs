@@ -1,3 +1,13 @@
+mod cfg;
+mod lvn;
+mod tdce;
+
 fn main() {
-    println!("Hello, world!");
+    let mut program = bril_rs::load_program();
+
+    for function in &mut program.functions {
+        tdce::trivial_dead_code_elimination(function);
+    }
+
+    bril_rs::output_program(&program);
 }
