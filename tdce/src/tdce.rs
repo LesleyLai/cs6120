@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 // Trivial Dead Code Elimination
-//use crate::cfg;
 use bril_rs::{Code, Function, Instruction};
 
 // Return whether the pass converges

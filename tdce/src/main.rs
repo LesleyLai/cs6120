@@ -1,7 +1,4 @@
-mod cfg;
-mod lvn;
 mod tdce;
-
 fn main() {
     let mut program = bril_rs::load_program();
 
