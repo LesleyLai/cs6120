@@ -1,0 +1,1 @@
+command = "bril2json < {filename} | cargo run -p bril-lvn -- {args} | bril2txt"

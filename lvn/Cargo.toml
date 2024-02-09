@@ -11,4 +11,4 @@ bril-utils = { path = "../utils" }
 [dependencies.bril-rs]
 version = "0.1.0"
 path = "../deps/bril/bril-rs"
-features = ["ssa", "memory", "float", "speculate", "position"]
+features = ["char", "ssa", "memory", "float", "speculate", "position"]
