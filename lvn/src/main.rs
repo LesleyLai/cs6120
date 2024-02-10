@@ -89,7 +89,11 @@ fn lvn_block_pass(block: &mut BasicBlock) {
 
                         // Use (canonical) variables in the table rather than old args
                         for arg in args_mut(instr) {
-                            *arg = num_to_canonical_var[*var_to_num.get(arg).unwrap()].clone();
+                            // Argument may not have a value number if it was defined in another basic block
+                            // TODO: is this correct?
+                            if let Some(&arg_value_number) = var_to_num.get(arg) {
+                                *arg = num_to_canonical_var[arg_value_number].clone();
+                            }
                         }
                     }
 
@@ -105,9 +109,11 @@ pub fn local_value_numbering(func: &mut Function) {
 
     for block in &mut blocks {
         lvn_block_pass(block);
+    }
 
-        // TODO: temporary hack
-        func.instrs = block.clone();
+    func.instrs = vec![];
+    for block in &mut blocks {
+        func.instrs.append(block);
     }
 }
 
