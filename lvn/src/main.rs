@@ -41,8 +41,7 @@ fn lvn_block_pass(block: &mut BasicBlock) {
     let mut var_from_value: HashMap<Value, (String, usize)> = HashMap::new();
     // mapping from variable names to their current value number
     let mut num_from_var: HashMap<String, usize> = HashMap::new();
-
-    let mut canonical_var_from_num = vec![];
+    let mut canonical_var_from_num: Vec<String> = vec![];
 
     for code in block {
         if let Code::Instruction(instr) = code {
@@ -59,7 +58,15 @@ fn lvn_block_pass(block: &mut BasicBlock) {
             };
 
             match maybe_dest_value_pair {
-                None => continue,
+                None => {
+                    // Effects
+                    for arg in args_mut(instr) {
+                        // Argument may not have a value number if it was defined in another basic block
+                        if let Some(&arg_value_number) = num_from_var.get(arg) {
+                            *arg = canonical_var_from_num[arg_value_number].clone();
+                        }
+                    }
+                }
                 Some((dest, value)) => {
                     let num: usize;
 
@@ -80,6 +87,35 @@ fn lvn_block_pass(block: &mut BasicBlock) {
                             op_type: bril_rs::Type::Int,
                         });
                     } else {
+                        // Handle copy propagation
+                        match value {
+                            Value::Op(ValueOps::Id, args) => {
+                                match num_from_var.get(&args[0]) {
+                                    None => {}
+                                    // If arg already has associate number
+                                    Some(num) => {
+                                        // TODO: check whether the original is a constant
+
+                                        *code = Code::Instruction(Instruction::Value {
+                                            args: vec![canonical_var_from_num[*num].clone()],
+                                            dest: dest.clone(),
+                                            funcs: vec![],
+                                            labels: vec![],
+                                            op: ValueOps::Id,
+                                            pos: instr.get_pos(),
+                                            // TODO: more types
+                                            op_type: bril_rs::Type::Int,
+                                        });
+
+                                        num_from_var.insert(dest.clone(), *num);
+                                    }
+                                }
+
+                                continue;
+                            }
+                            _ => {}
+                        }
+
                         // A newly computed value.
                         num = canonical_var_from_num.len();
                         canonical_var_from_num.push(dest.clone());
