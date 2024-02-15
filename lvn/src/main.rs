@@ -38,11 +38,11 @@ fn args_mut(instr: &mut Instruction) -> &mut [String] {
 
 fn lvn_block_pass(block: &mut BasicBlock) {
     // Mapping from value tuples to canonical variables, with each row numbered
-    let mut value_to_var: HashMap<Value, (String, usize)> = HashMap::new();
+    let mut var_from_value: HashMap<Value, (String, usize)> = HashMap::new();
     // mapping from variable names to their current value number
-    let mut var_to_num: HashMap<String, usize> = HashMap::new();
+    let mut num_from_var: HashMap<String, usize> = HashMap::new();
 
-    let mut num_to_canonical_var = vec![];
+    let mut canonical_var_from_num = vec![];
 
     for code in block {
         if let Code::Instruction(instr) = code {
@@ -64,9 +64,9 @@ fn lvn_block_pass(block: &mut BasicBlock) {
                     let num: usize;
 
                     // Already in table
-                    if value_to_var.contains_key(&value.clone()) {
+                    if var_from_value.contains_key(&value.clone()) {
                         // This value have been computed before. Reuse it
-                        let (var, num2) = value_to_var.get(&value.clone()).unwrap();
+                        let (var, num2) = var_from_value.get(&value.clone()).unwrap();
                         num = *num2;
 
                         *code = Code::Instruction(Instruction::Value {
@@ -81,23 +81,23 @@ fn lvn_block_pass(block: &mut BasicBlock) {
                         });
                     } else {
                         // A newly computed value.
-                        num = num_to_canonical_var.len();
-                        num_to_canonical_var.push(dest.clone());
+                        num = canonical_var_from_num.len();
+                        canonical_var_from_num.push(dest.clone());
 
                         // Add to table
-                        value_to_var.insert(value.clone(), (dest.clone(), num));
+                        var_from_value.insert(value.clone(), (dest.clone(), num));
 
                         // Use (canonical) variables in the table rather than old args
                         for arg in args_mut(instr) {
                             // Argument may not have a value number if it was defined in another basic block
-                            // TODO: is this correct?
-                            if let Some(&arg_value_number) = var_to_num.get(arg) {
-                                *arg = num_to_canonical_var[arg_value_number].clone();
+
+                            if let Some(&arg_value_number) = num_from_var.get(arg) {
+                                *arg = canonical_var_from_num[arg_value_number].clone();
                             }
                         }
                     }
 
-                    var_to_num.insert(dest.clone(), num);
+                    num_from_var.insert(dest.clone(), num);
                 }
             }
         }
