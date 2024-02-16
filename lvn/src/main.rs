@@ -1,7 +1,13 @@
+mod cli_options;
+
+use crate::cli_options::{parse_options, Options};
 use bril_rs::{Code, ConstOps, Function, Instruction, Literal, ValueOps};
 use bril_utils::{instructions_to_blocks, BasicBlock};
-use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::{
+    collections::HashMap,
+    env,
+    hash::{Hash, Hasher},
+};
 
 #[derive(Debug, Clone, PartialEq)]
 enum Value {
@@ -36,7 +42,7 @@ fn args_mut(instr: &mut Instruction) -> &mut [String] {
     }
 }
 
-fn lvn_block_pass(block: &mut BasicBlock) {
+fn lvn_block_pass(block: &mut BasicBlock, option: &Options) {
     // Mapping from value tuples to canonical variables, with each row numbered
     let mut var_from_value: HashMap<Value, (String, usize)> = HashMap::new();
     // mapping from variable names to their current value number
@@ -88,46 +94,50 @@ fn lvn_block_pass(block: &mut BasicBlock) {
                             op_type: bril_rs::Type::Int,
                         });
                     } else {
-                        // Handle copy propagation
-                        match value {
-                            Value::Op(ValueOps::Id, args) => {
-                                match num_from_var.get(&args[0]) {
-                                    None => {}
-                                    // If arg already has associate number
-                                    Some(num) => {
-                                        // TODO: check whether the original is a constant
-                                        match &value_from_num[*num] {
-                                            Value::Constant(literal) => {
-                                                *code = Code::Instruction(Instruction::Constant {
-                                                    dest: dest.clone(),
-                                                    op: ConstOps::Const,
-                                                    pos: instr.get_pos(),
-                                                    // TODO: more types
-                                                    const_type: bril_rs::Type::Int,
-                                                    value: literal.clone(),
-                                                })
-                                            }
-                                            _ => {
-                                                *code = Code::Instruction(Instruction::Value {
-                                                    args: vec![canonical_var_from_num[*num].clone()],
-                                                    dest: dest.clone(),
-                                                    funcs: vec![],
-                                                    labels: vec![],
-                                                    op: ValueOps::Id,
-                                                    pos: instr.get_pos(),
-                                                    // TODO: more types
-                                                    op_type: bril_rs::Type::Int,
-                                                })
-                                            }
-                                        };
+                        if option.handle_copy_propagate {
+                            match value {
+                                Value::Op(ValueOps::Id, args) => {
+                                    match num_from_var.get(&args[0]) {
+                                        None => {}
+                                        // If arg already has associate number
+                                        Some(num) => {
+                                            // TODO: check whether the original is a constant
+                                            match &value_from_num[*num] {
+                                                Value::Constant(literal) => {
+                                                    *code =
+                                                        Code::Instruction(Instruction::Constant {
+                                                            dest: dest.clone(),
+                                                            op: ConstOps::Const,
+                                                            pos: instr.get_pos(),
+                                                            // TODO: more types
+                                                            const_type: bril_rs::Type::Int,
+                                                            value: literal.clone(),
+                                                        })
+                                                }
+                                                _ => {
+                                                    *code = Code::Instruction(Instruction::Value {
+                                                        args: vec![
+                                                            canonical_var_from_num[*num].clone()
+                                                        ],
+                                                        dest: dest.clone(),
+                                                        funcs: vec![],
+                                                        labels: vec![],
+                                                        op: ValueOps::Id,
+                                                        pos: instr.get_pos(),
+                                                        // TODO: more types
+                                                        op_type: bril_rs::Type::Int,
+                                                    })
+                                                }
+                                            };
 
-                                        num_from_var.insert(dest.clone(), *num);
+                                            num_from_var.insert(dest.clone(), *num);
+                                        }
                                     }
-                                }
 
-                                continue;
+                                    continue;
+                                }
+                                _ => {}
                             }
-                            _ => {}
                         }
 
                         // A newly computed value.
@@ -155,11 +165,11 @@ fn lvn_block_pass(block: &mut BasicBlock) {
     }
 }
 
-pub fn local_value_numbering(func: &mut Function) {
+fn local_value_numbering(func: &mut Function, option: &Options) {
     let mut blocks = instructions_to_blocks(&func.instrs);
 
     for block in &mut blocks {
-        lvn_block_pass(block);
+        lvn_block_pass(block, option);
     }
 
     func.instrs = vec![];
@@ -169,10 +179,13 @@ pub fn local_value_numbering(func: &mut Function) {
 }
 
 fn main() {
+    let args: Box<[String]> = env::args().collect::<Vec<_>>().into_boxed_slice();
+    let options = parse_options(&args);
+
     let mut program = bril_rs::load_program();
 
     for function in &mut program.functions {
-        local_value_numbering(function);
+        local_value_numbering(function, &options);
     }
 
     bril_rs::output_program(&program);
