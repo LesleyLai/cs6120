@@ -1,4 +1,4 @@
-use bril_rs::{Code, Function, Instruction, Literal, ValueOps};
+use bril_rs::{Code, ConstOps, Function, Instruction, Literal, ValueOps};
 use bril_utils::{instructions_to_blocks, BasicBlock};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -42,6 +42,7 @@ fn lvn_block_pass(block: &mut BasicBlock) {
     // mapping from variable names to their current value number
     let mut num_from_var: HashMap<String, usize> = HashMap::new();
     let mut canonical_var_from_num: Vec<String> = vec![];
+    let mut value_from_num: Vec<Value> = vec![];
 
     for code in block {
         if let Code::Instruction(instr) = code {
@@ -95,17 +96,30 @@ fn lvn_block_pass(block: &mut BasicBlock) {
                                     // If arg already has associate number
                                     Some(num) => {
                                         // TODO: check whether the original is a constant
-
-                                        *code = Code::Instruction(Instruction::Value {
-                                            args: vec![canonical_var_from_num[*num].clone()],
-                                            dest: dest.clone(),
-                                            funcs: vec![],
-                                            labels: vec![],
-                                            op: ValueOps::Id,
-                                            pos: instr.get_pos(),
-                                            // TODO: more types
-                                            op_type: bril_rs::Type::Int,
-                                        });
+                                        match &value_from_num[*num] {
+                                            Value::Constant(literal) => {
+                                                *code = Code::Instruction(Instruction::Constant {
+                                                    dest: dest.clone(),
+                                                    op: ConstOps::Const,
+                                                    pos: instr.get_pos(),
+                                                    // TODO: more types
+                                                    const_type: bril_rs::Type::Int,
+                                                    value: literal.clone(),
+                                                })
+                                            }
+                                            _ => {
+                                                *code = Code::Instruction(Instruction::Value {
+                                                    args: vec![canonical_var_from_num[*num].clone()],
+                                                    dest: dest.clone(),
+                                                    funcs: vec![],
+                                                    labels: vec![],
+                                                    op: ValueOps::Id,
+                                                    pos: instr.get_pos(),
+                                                    // TODO: more types
+                                                    op_type: bril_rs::Type::Int,
+                                                })
+                                            }
+                                        };
 
                                         num_from_var.insert(dest.clone(), *num);
                                     }
@@ -119,6 +133,7 @@ fn lvn_block_pass(block: &mut BasicBlock) {
                         // A newly computed value.
                         num = canonical_var_from_num.len();
                         canonical_var_from_num.push(dest.clone());
+                        value_from_num.push(value.clone());
 
                         // Add to table
                         var_from_value.insert(value.clone(), (dest.clone(), num));
