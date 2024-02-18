@@ -42,74 +42,93 @@ fn args_mut(instr: &mut Instruction) -> &mut [String] {
     }
 }
 
-fn replace_arguments_with_canonical_variables(
-    instr: &mut Instruction,
-    num_from_var: &mut HashMap<String, usize>,
-    canonical_var_from_num: &mut Vec<String>,
-) {
-    for arg in args_mut(instr) {
-        match num_from_var.get(arg).copied() {
-            None => {
-                // argument is not defined in this block. Create a dummy number for it
-                let num = canonical_var_from_num.len();
-                num_from_var.insert(arg.clone(), num);
-                canonical_var_from_num.push(arg.clone());
-            }
-            Some(arg_value_number) => {
-                // Use (canonical) variables in the table rather than old args
-                *arg = canonical_var_from_num[arg_value_number].clone();
+struct LVN {
+    // Mapping from value tuples to canonical variables, with each row numbered
+    var_and_num_from_value: HashMap<ValueExpr, (String, usize)>,
+    // mapping from variable names to their current value number
+    num_from_var: HashMap<String, usize>,
+    canonical_var_from_num: Vec<String>,
+    value_from_num: HashMap<usize, ValueExpr>,
+}
+
+impl LVN {
+    fn new() -> Self {
+        LVN {
+            var_and_num_from_value: Default::default(),
+            num_from_var: Default::default(),
+            canonical_var_from_num: vec![],
+            value_from_num: Default::default(),
+        }
+    }
+
+    fn replace_args_with_canonical_variables(self: &mut Self, instr: &mut Instruction) {
+        for arg in args_mut(instr) {
+            match self.num_from_var.get(arg).copied() {
+                None => {
+                    // argument is not defined in this block. Create a dummy number for it
+                    let num = self.canonical_var_from_num.len();
+                    self.num_from_var.insert(arg.clone(), num);
+                    self.canonical_var_from_num.push(arg.clone());
+                }
+                Some(arg_value_number) => {
+                    // Use (canonical) variables in the table rather than old args
+                    *arg = self.canonical_var_from_num[arg_value_number].clone();
+                }
             }
         }
+    }
+
+    // Adds a new table entry with a fresh number and associate this numver with a canonical variable and a value
+    fn add_fresh_num_to_table(self: &mut Self, canonical_var: String, value: ValueExpr) {
+        let num = self.canonical_var_from_num.len();
+        self.canonical_var_from_num.push(canonical_var.clone());
+        self.value_from_num.insert(num, value.clone());
+        self.var_and_num_from_value
+            .insert(value, (canonical_var.clone(), num));
+        self.num_from_var.insert(canonical_var, num);
+    }
+}
+
+fn get_dest_and_value(instr: Instruction) -> Option<(String, ValueExpr)> {
+    match instr {
+        Instruction::Constant {
+            dest,
+            value,
+            const_type,
+            ..
+        } => {
+            let value = ValueExpr::Constant(value, const_type);
+            Some((dest, value))
+        }
+        Instruction::Value {
+            op,
+            args,
+            dest,
+            op_type,
+            ..
+        } => {
+            let value = ValueExpr::Op(op, args.clone(), op_type);
+            Some((dest, value))
+        }
+        Instruction::Effect { .. } => None,
     }
 }
 
 fn lvn_block_pass(block: &mut BasicBlock, option: &Options) {
-    // Mapping from value tuples to canonical variables, with each row numbered
-    let mut var_and_num_from_value: HashMap<ValueExpr, (String, usize)> = HashMap::new();
-    // mapping from variable names to their current value number
-    let mut num_from_var: HashMap<String, usize> = HashMap::new();
-    let mut canonical_var_from_num: Vec<String> = vec![];
-    let mut value_from_num: HashMap<usize, ValueExpr> = HashMap::new();
+    let mut lvn = LVN::new();
 
     for code in block {
         if let Code::Instruction(instr) = code {
-            let maybe_dest_value_pair = match instr.clone() {
-                Instruction::Constant {
-                    dest,
-                    value,
-                    const_type,
-                    ..
-                } => {
-                    let value = ValueExpr::Constant(value, const_type);
-                    Some((dest, value))
-                }
-                Instruction::Value {
-                    op,
-                    args,
-                    dest,
-                    op_type,
-                    ..
-                } => {
-                    let value = ValueExpr::Op(op, args.clone(), op_type);
-                    Some((dest, value))
-                }
-                Instruction::Effect { .. } => None,
-            };
-
-            match maybe_dest_value_pair {
+            match get_dest_and_value(instr.clone()) {
                 None => {
                     // Effects
-                    replace_arguments_with_canonical_variables(
-                        instr,
-                        &mut num_from_var,
-                        &mut canonical_var_from_num,
-                    );
+                    lvn.replace_args_with_canonical_variables(instr);
                 }
                 Some((dest, value)) => {
                     let num: usize;
 
                     // Already in table
-                    match var_and_num_from_value.get(&value.clone()) {
+                    match lvn.var_and_num_from_value.get(&value.clone()) {
                         Some((var, num2)) => {
                             // This value have been computed before. Reuse it
                             num = *num2;
@@ -122,27 +141,28 @@ fn lvn_block_pass(block: &mut BasicBlock, option: &Options) {
                                 op: ValueOps::Id,
                                 pos: None,
                                 // TODO: more types
-                                op_type: bril_rs::Type::Int,
+                                op_type: Type::Int,
                             });
+
+                            lvn.num_from_var.insert(dest.clone(), num);
                         }
                         // A brand-new value
                         None => {
                             if option.handle_copy_propagate {
                                 match value {
                                     ValueExpr::Op(ValueOps::Id, args, typ) => {
-                                        match num_from_var.get(&args[0]) {
+                                        match lvn.num_from_var.get(&args[0]) {
                                             None => {
                                                 // argument is not defined in this block. Create a dummy number for it
-                                                let num = canonical_var_from_num.len();
-                                                num_from_var.insert(args[0].clone(), num);
-                                                canonical_var_from_num.push(args[0].clone());
-
-                                                num_from_var.insert(dest.clone(), num);
+                                                let num = lvn.canonical_var_from_num.len();
+                                                lvn.num_from_var.insert(args[0].clone(), num);
+                                                lvn.canonical_var_from_num.push(args[0].clone());
+                                                lvn.num_from_var.insert(dest.clone(), num);
                                             }
                                             // If arg already has associate number
                                             Some(num) => {
                                                 // check whether the original is a constant
-                                                match &value_from_num.get(num) {
+                                                match &lvn.value_from_num.get(num) {
                                                     Some(ValueExpr::Constant(literal, typ)) => {
                                                         *code = Code::Instruction(
                                                             Instruction::Constant {
@@ -157,8 +177,8 @@ fn lvn_block_pass(block: &mut BasicBlock, option: &Options) {
                                                     _ => {
                                                         *code =
                                                             Code::Instruction(Instruction::Value {
-                                                                args: vec![canonical_var_from_num
-                                                                    [*num]
+                                                                args: vec![lvn
+                                                                    .canonical_var_from_num[*num]
                                                                     .clone()],
                                                                 dest: dest.clone(),
                                                                 funcs: vec![],
@@ -170,7 +190,7 @@ fn lvn_block_pass(block: &mut BasicBlock, option: &Options) {
                                                     }
                                                 };
 
-                                                num_from_var.insert(dest.clone(), *num);
+                                                lvn.num_from_var.insert(dest.clone(), *num);
                                             }
                                         }
 
@@ -181,22 +201,10 @@ fn lvn_block_pass(block: &mut BasicBlock, option: &Options) {
                             }
 
                             // A newly computed value.
-                            num = canonical_var_from_num.len();
-                            canonical_var_from_num.push(dest.clone());
-                            value_from_num.insert(num, value.clone());
-
-                            // Add to table
-                            var_and_num_from_value.insert(value.clone(), (dest.clone(), num));
-
-                            replace_arguments_with_canonical_variables(
-                                instr,
-                                &mut num_from_var,
-                                &mut canonical_var_from_num,
-                            );
+                            lvn.add_fresh_num_to_table(dest.clone(), value.clone());
+                            lvn.replace_args_with_canonical_variables(instr);
                         }
                     }
-
-                    num_from_var.insert(dest.clone(), num);
                 }
             }
         }
