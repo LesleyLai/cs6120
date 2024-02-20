@@ -12,7 +12,7 @@ use std::{
 #[derive(Debug, Clone, PartialEq)]
 enum ValueExpr {
     Constant(Literal, Type),
-    Op(ValueOps, Vec<String>, Type),
+    Op(ValueOps, Vec<usize>, Type),
 }
 
 impl Hash for ValueExpr {
@@ -87,30 +87,45 @@ impl LVN {
             .insert(value, (canonical_var.clone(), num));
         self.num_from_var.insert(canonical_var, num);
     }
-}
 
-fn get_dest_and_value(instr: Instruction) -> Option<(String, ValueExpr)> {
-    match instr {
-        Instruction::Constant {
-            dest,
-            value,
-            const_type,
-            ..
-        } => {
-            let value = ValueExpr::Constant(value, const_type);
-            Some((dest, value))
+    fn get_dest_and_value(self: &mut Self, instr: Instruction) -> Option<(String, ValueExpr)> {
+        match instr {
+            Instruction::Constant {
+                dest,
+                value,
+                const_type,
+                ..
+            } => {
+                let value = ValueExpr::Constant(value, const_type);
+                Some((dest, value))
+            }
+            Instruction::Value {
+                op,
+                args,
+                dest,
+                op_type,
+                ..
+            } => {
+                let number_args: Vec<usize> = args
+                    .iter()
+                    .map(|arg: &String| match self.num_from_var.get(arg) {
+                        None => {
+                            // argument is not defined in this block. Create a dummy number for it
+
+                            let num = self.canonical_var_from_num.len();
+                            self.num_from_var.insert(arg.clone(), num);
+                            self.canonical_var_from_num.push(arg.clone());
+                            num
+                        }
+                        Some(num) => *num,
+                    })
+                    .collect();
+
+                let value = ValueExpr::Op(op, number_args, op_type);
+                Some((dest, value))
+            }
+            Instruction::Effect { .. } => None,
         }
-        Instruction::Value {
-            op,
-            args,
-            dest,
-            op_type,
-            ..
-        } => {
-            let value = ValueExpr::Op(op, args.clone(), op_type);
-            Some((dest, value))
-        }
-        Instruction::Effect { .. } => None,
     }
 }
 
@@ -119,16 +134,96 @@ fn lvn_block_pass(block: &mut BasicBlock, option: &Options) {
 
     for code in block {
         if let Code::Instruction(instr) = code {
-            match get_dest_and_value(instr.clone()) {
+            match lvn.get_dest_and_value(instr.clone()) {
                 None => {
                     // Effects
                     lvn.replace_args_with_canonical_variables(instr);
                 }
-                Some((dest, value)) => {
-                    let num: usize;
+                Some((dest, mut value)) => {
+                    if option.handle_commutativity {
+                        match value {
+                            ValueExpr::Op(
+                                ValueOps::Add
+                                | ValueOps::Mul
+                                | ValueOps::And
+                                | ValueOps::Or
+                                | ValueOps::Eq,
+                                ref mut args,
+                                _,
+                            ) => {
+                                args.sort();
+                            }
+                            _ => {}
+                        }
+                    }
 
-                    // Already in table
+                    if option.handle_const_folding {
+                        match value {
+                            ValueExpr::Op(
+                                ValueOps::Add
+                                | ValueOps::Sub
+                                | ValueOps::Mul
+                                | ValueOps::Div
+                                | ValueOps::Eq
+                                | ValueOps::Lt
+                                | ValueOps::Gt
+                                | ValueOps::Le
+                                | ValueOps::Ge
+                                | ValueOps::Not
+                                | ValueOps::And
+                                | ValueOps::Or,
+                                ref mut args,
+                                _,
+                            ) => {
+                                let args_const_value =
+                                    args.iter().map(|arg| match lvn.value_from_num.get(arg) {
+                                        Some(ValueExpr::Constant(lit, _)) => Some(lit),
+                                        _ => None,
+                                    });
+
+                                // All arguments are constant, we can fold
+                                if args_const_value.clone().all(|opt| opt.is_some()) {
+                                    let arg_values: Vec<&Literal> =
+                                        args_const_value.filter_map(|opt| opt).collect();
+
+                                    match value {
+                                        ValueExpr::Op(ValueOps::And, _, _) => {
+                                            match (&arg_values[0], &arg_values[1]) {
+                                                (Literal::Bool(b1), Literal::Bool(b2)) => {
+                                                    let new_value = Literal::Bool(b1 == b2);
+                                                    *code =
+                                                        Code::Instruction(Instruction::Constant {
+                                                            dest: dest.clone(),
+                                                            op: ConstOps::Const,
+                                                            pos: None,
+                                                            const_type: new_value.get_type(),
+                                                            value: new_value.clone(),
+                                                        });
+
+                                                    lvn.add_fresh_num_to_table(
+                                                        dest.clone(),
+                                                        ValueExpr::Constant(
+                                                            new_value.clone(),
+                                                            new_value.get_type(),
+                                                        ),
+                                                    );
+
+                                                    continue;
+                                                }
+                                                _ => panic!("wrong argument type"),
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            _ => { /* can't fold, do nothing */ }
+                        }
+                    }
+
+                    let num: usize;
                     match lvn.var_and_num_from_value.get(&value.clone()) {
+                        // Already in table
                         Some((var, num2)) => {
                             // This value have been computed before. Reuse it
                             num = *num2;
@@ -151,48 +246,35 @@ fn lvn_block_pass(block: &mut BasicBlock, option: &Options) {
                             if option.handle_copy_propagate {
                                 match value {
                                     ValueExpr::Op(ValueOps::Id, args, typ) => {
-                                        match lvn.num_from_var.get(&args[0]) {
-                                            None => {
-                                                // argument is not defined in this block. Create a dummy number for it
-                                                let num = lvn.canonical_var_from_num.len();
-                                                lvn.num_from_var.insert(args[0].clone(), num);
-                                                lvn.canonical_var_from_num.push(args[0].clone());
-                                                lvn.num_from_var.insert(dest.clone(), num);
-                                            }
-                                            // If arg already has associate number
-                                            Some(num) => {
-                                                // check whether the original is a constant
-                                                match &lvn.value_from_num.get(num) {
-                                                    Some(ValueExpr::Constant(literal, typ)) => {
-                                                        *code = Code::Instruction(
-                                                            Instruction::Constant {
-                                                                dest: dest.clone(),
-                                                                op: ConstOps::Const,
-                                                                pos: None,
-                                                                const_type: typ.clone(),
-                                                                value: literal.clone(),
-                                                            },
-                                                        )
-                                                    }
-                                                    _ => {
-                                                        *code =
-                                                            Code::Instruction(Instruction::Value {
-                                                                args: vec![lvn
-                                                                    .canonical_var_from_num[*num]
-                                                                    .clone()],
-                                                                dest: dest.clone(),
-                                                                funcs: vec![],
-                                                                labels: vec![],
-                                                                op: ValueOps::Id,
-                                                                pos: None,
-                                                                op_type: typ.clone(),
-                                                            })
-                                                    }
-                                                };
+                                        let num = args[0];
 
-                                                lvn.num_from_var.insert(dest.clone(), *num);
+                                        // check whether the original is a constant
+                                        match &lvn.value_from_num.get(&num) {
+                                            Some(ValueExpr::Constant(literal, typ)) => {
+                                                *code = Code::Instruction(Instruction::Constant {
+                                                    dest: dest.clone(),
+                                                    op: ConstOps::Const,
+                                                    pos: None,
+                                                    const_type: typ.clone(),
+                                                    value: literal.clone(),
+                                                })
                                             }
-                                        }
+                                            _ => {
+                                                *code = Code::Instruction(Instruction::Value {
+                                                    args: vec![
+                                                        lvn.canonical_var_from_num[num].clone()
+                                                    ],
+                                                    dest: dest.clone(),
+                                                    funcs: vec![],
+                                                    labels: vec![],
+                                                    op: ValueOps::Id,
+                                                    pos: None,
+                                                    op_type: typ.clone(),
+                                                })
+                                            }
+                                        };
+
+                                        lvn.num_from_var.insert(dest.clone(), num);
 
                                         continue;
                                     }
