@@ -15,6 +15,27 @@ enum ValueExpr {
     Op(ValueOps, Vec<usize>, Type),
 }
 
+impl ValueExpr {
+    fn from_literal(literal: Literal) -> Self {
+        let typ = literal.get_type();
+        ValueExpr::Constant(literal, typ)
+    }
+
+    fn get_type(&self) -> Type {
+        match self {
+            ValueExpr::Constant(_, typ) => typ.clone(),
+            ValueExpr::Op(_, _, typ) => typ.clone(),
+        }
+    }
+
+    fn get_constant_bool(&self) -> bool {
+        match self {
+            ValueExpr::Constant(Literal::Bool(b), _) => *b,
+            _ => panic!("The Value Expr does not have a bool constant"),
+        }
+    }
+}
+
 impl Hash for ValueExpr {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
@@ -90,13 +111,8 @@ impl LVN {
 
     fn get_dest_and_value(self: &mut Self, instr: Instruction) -> Option<(String, ValueExpr)> {
         match instr {
-            Instruction::Constant {
-                dest,
-                value,
-                const_type,
-                ..
-            } => {
-                let value = ValueExpr::Constant(value, const_type);
+            Instruction::Constant { dest, value, .. } => {
+                let value = ValueExpr::from_literal(value);
                 Some((dest, value))
             }
             Instruction::Value {
@@ -129,6 +145,31 @@ impl LVN {
     }
 }
 
+fn make_constant_instruction(dest: String, value: Literal) -> Code {
+    Code::Instruction(Instruction::Constant {
+        dest: dest.clone(),
+        op: ConstOps::Const,
+        pos: None,
+        const_type: value.get_type(),
+        value: value.clone(),
+    })
+}
+
+// Returns an iterator of arguments if all arguments has constant value. None otherwise.
+fn all_constant_args<'a, 'b>(lvn: &'a LVN, args: &'b [usize]) -> Option<Vec<&'a Literal>> {
+    let args_const_value = args.iter().map(|arg| match lvn.value_from_num.get(arg) {
+        Some(ValueExpr::Constant(lit, _)) => Some(lit),
+        _ => None,
+    });
+
+    if args_const_value.clone().all(|opt| opt.is_some()) {
+        let arg_values: Vec<&Literal> = args_const_value.filter_map(|opt| opt).collect();
+        Some(arg_values)
+    } else {
+        None
+    }
+}
+
 fn lvn_block_pass(block: &mut BasicBlock, option: &Options) {
     let mut lvn = LVN::new();
 
@@ -143,11 +184,7 @@ fn lvn_block_pass(block: &mut BasicBlock, option: &Options) {
                     if option.handle_commutativity {
                         match value {
                             ValueExpr::Op(
-                                ValueOps::Add
-                                | ValueOps::Mul
-                                | ValueOps::And
-                                | ValueOps::Or
-                                | ValueOps::Eq,
+                                ValueOps::Add | ValueOps::Mul | ValueOps::Eq,
                                 ref mut args,
                                 _,
                             ) => {
@@ -159,65 +196,94 @@ fn lvn_block_pass(block: &mut BasicBlock, option: &Options) {
 
                     if option.handle_const_folding {
                         match value {
-                            ValueExpr::Op(
-                                ValueOps::Add
-                                | ValueOps::Sub
-                                | ValueOps::Mul
-                                | ValueOps::Div
-                                | ValueOps::Eq
-                                | ValueOps::Lt
-                                | ValueOps::Gt
-                                | ValueOps::Le
-                                | ValueOps::Ge
-                                | ValueOps::Not
-                                | ValueOps::And
-                                | ValueOps::Or,
-                                ref mut args,
-                                _,
-                            ) => {
-                                let args_const_value =
-                                    args.iter().map(|arg| match lvn.value_from_num.get(arg) {
-                                        Some(ValueExpr::Constant(lit, _)) => Some(lit),
-                                        _ => None,
-                                    });
+                            ValueExpr::Op(ValueOps::And, ref args, _) => {
+                                let (arg1_num, arg2_num) = (args[0], args[1]);
 
-                                // All arguments are constant, we can fold
-                                if args_const_value.clone().all(|opt| opt.is_some()) {
-                                    let arg_values: Vec<&Literal> =
-                                        args_const_value.filter_map(|opt| opt).collect();
+                                let bool1 = lvn
+                                    .value_from_num
+                                    .get(&arg1_num)
+                                    .map(|value| value.get_constant_bool());
 
-                                    match value {
-                                        ValueExpr::Op(ValueOps::And, _, _) => {
-                                            match (&arg_values[0], &arg_values[1]) {
-                                                (Literal::Bool(b1), Literal::Bool(b2)) => {
-                                                    let new_value = Literal::Bool(b1 == b2);
-                                                    *code =
-                                                        Code::Instruction(Instruction::Constant {
-                                                            dest: dest.clone(),
-                                                            op: ConstOps::Const,
-                                                            pos: None,
-                                                            const_type: new_value.get_type(),
-                                                            value: new_value.clone(),
-                                                        });
+                                let bool2 = lvn
+                                    .value_from_num
+                                    .get(&arg2_num)
+                                    .map(|value| value.get_constant_bool());
 
-                                                    lvn.add_fresh_num_to_table(
-                                                        dest.clone(),
-                                                        ValueExpr::Constant(
-                                                            new_value.clone(),
-                                                            new_value.get_type(),
-                                                        ),
-                                                    );
+                                let new_bool = match (bool1, bool2) {
+                                    (Some(false), _) | (_, Some(false)) => Some(false),
+                                    (Some(true), Some(true)) => Some(true),
+                                    _ => None,
+                                };
 
-                                                    continue;
-                                                }
-                                                _ => panic!("wrong argument type"),
-                                            }
-                                        }
-                                        _ => {}
-                                    }
+                                if let Some(new_bool) = new_bool {
+                                    let new_value = Literal::Bool(new_bool);
+                                    *code =
+                                        make_constant_instruction(dest.clone(), new_value.clone());
+
+                                    lvn.add_fresh_num_to_table(
+                                        dest,
+                                        ValueExpr::from_literal(new_value),
+                                    );
+
+                                    continue;
                                 }
                             }
-                            _ => { /* can't fold, do nothing */ }
+                            ValueExpr::Op(ValueOps::Or, ref args, _) => {
+                                let (arg1_num, arg2_num) = (args[0], args[1]);
+
+                                let bool1 = lvn
+                                    .value_from_num
+                                    .get(&arg1_num)
+                                    .map(|value| value.get_constant_bool());
+
+                                let bool2 = lvn
+                                    .value_from_num
+                                    .get(&arg2_num)
+                                    .map(|value| value.get_constant_bool());
+
+                                let new_bool = match (bool1, bool2) {
+                                    (Some(true), _) | (_, Some(true)) => Some(true),
+                                    (Some(false), Some(false)) => Some(false),
+                                    _ => None,
+                                };
+
+                                if let Some(new_bool) = new_bool {
+                                    let new_value = Literal::Bool(new_bool);
+                                    *code =
+                                        make_constant_instruction(dest.clone(), new_value.clone());
+
+                                    lvn.add_fresh_num_to_table(
+                                        dest,
+                                        ValueExpr::from_literal(new_value),
+                                    );
+
+                                    continue;
+                                }
+                            }
+                            ValueExpr::Op(ValueOps::Not, ref args, _) => {
+                                let arg1_num = args[0];
+
+                                let bool1 = lvn
+                                    .value_from_num
+                                    .get(&arg1_num)
+                                    .map(|value| value.get_constant_bool());
+
+                                let new_bool = bool1.map(|b| !b);
+
+                                if let Some(new_bool) = new_bool {
+                                    let new_value = Literal::Bool(new_bool);
+                                    *code =
+                                        make_constant_instruction(dest.clone(), new_value.clone());
+
+                                    lvn.add_fresh_num_to_table(
+                                        dest,
+                                        ValueExpr::from_literal(new_value),
+                                    );
+
+                                    continue;
+                                }
+                            }
+                            _ => { /* Can't fold. Do nothing */ }
                         }
                     }
 
@@ -235,8 +301,7 @@ fn lvn_block_pass(block: &mut BasicBlock, option: &Options) {
                                 labels: vec![],
                                 op: ValueOps::Id,
                                 pos: None,
-                                // TODO: more types
-                                op_type: Type::Int,
+                                op_type: value.get_type(),
                             });
 
                             lvn.num_from_var.insert(dest.clone(), num);
@@ -250,14 +315,11 @@ fn lvn_block_pass(block: &mut BasicBlock, option: &Options) {
 
                                         // check whether the original is a constant
                                         match &lvn.value_from_num.get(&num) {
-                                            Some(ValueExpr::Constant(literal, typ)) => {
-                                                *code = Code::Instruction(Instruction::Constant {
-                                                    dest: dest.clone(),
-                                                    op: ConstOps::Const,
-                                                    pos: None,
-                                                    const_type: typ.clone(),
-                                                    value: literal.clone(),
-                                                })
+                                            Some(ValueExpr::Constant(literal, _)) => {
+                                                *code = make_constant_instruction(
+                                                    dest.clone(),
+                                                    literal.clone(),
+                                                );
                                             }
                                             _ => {
                                                 *code = Code::Instruction(Instruction::Value {
