@@ -155,19 +155,20 @@ fn make_constant_instruction(dest: String, value: Literal) -> Code {
     })
 }
 
-// Returns an iterator of arguments if all arguments has constant value. None otherwise.
-fn all_constant_args<'a, 'b>(lvn: &'a LVN, args: &'b [usize]) -> Option<Vec<&'a Literal>> {
-    let args_const_value = args.iter().map(|arg| match lvn.value_from_num.get(arg) {
-        Some(ValueExpr::Constant(lit, _)) => Some(lit),
-        _ => None,
-    });
+fn make_value_instruction(dest: String, typ: Type, op: ValueOps, args: Vec<String>) -> Code {
+    Code::Instruction(Instruction::Value {
+        args,
+        dest,
+        funcs: vec![],
+        labels: vec![],
+        op: ValueOps::Id,
+        pos: None,
+        op_type: typ.clone(),
+    })
+}
 
-    if args_const_value.clone().all(|opt| opt.is_some()) {
-        let arg_values: Vec<&Literal> = args_const_value.filter_map(|opt| opt).collect();
-        Some(arg_values)
-    } else {
-        None
-    }
+fn make_id_instruction(dest: String, typ: Type, arg: String) -> Code {
+    make_value_instruction(dest, typ, ValueOps::Id, vec![arg])
 }
 
 fn lvn_block_pass(block: &mut BasicBlock, option: &Options) {
@@ -293,17 +294,8 @@ fn lvn_block_pass(block: &mut BasicBlock, option: &Options) {
                         Some((var, num2)) => {
                             // This value have been computed before. Reuse it
                             num = *num2;
-
-                            *code = Code::Instruction(Instruction::Value {
-                                args: vec![var.clone()],
-                                dest: dest.clone(),
-                                funcs: vec![],
-                                labels: vec![],
-                                op: ValueOps::Id,
-                                pos: None,
-                                op_type: value.get_type(),
-                            });
-
+                            *code =
+                                make_id_instruction(dest.clone(), value.get_type(), var.clone());
                             lvn.num_from_var.insert(dest.clone(), num);
                         }
                         // A brand-new value
@@ -322,17 +314,11 @@ fn lvn_block_pass(block: &mut BasicBlock, option: &Options) {
                                                 );
                                             }
                                             _ => {
-                                                *code = Code::Instruction(Instruction::Value {
-                                                    args: vec![
-                                                        lvn.canonical_var_from_num[num].clone()
-                                                    ],
-                                                    dest: dest.clone(),
-                                                    funcs: vec![],
-                                                    labels: vec![],
-                                                    op: ValueOps::Id,
-                                                    pos: None,
-                                                    op_type: typ.clone(),
-                                                })
+                                                *code = make_id_instruction(
+                                                    dest.clone(),
+                                                    typ.clone(),
+                                                    lvn.canonical_var_from_num[num].clone(),
+                                                );
                                             }
                                         };
 
